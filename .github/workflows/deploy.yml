@@ -26,10 +26,10 @@ jobs:
       - name: 체크아웃
         uses: actions/checkout@v6
 
-      - name: Python 3.14 세팅
+      - name: Python 3.13 세팅
         uses: actions/setup-python@v6
         with:
-          python-version: '3.14'
+          python-version: '3.13'
 
       - name: 의존성 설치 & 문법 검사
         run: |
