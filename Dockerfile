@@ -1,5 +1,5 @@
-# 파이썬 3.10 슬림 버전 사용 (용량 최적화)
-FROM python:3.14-slim
+# 파이썬 3.13 슬림 버전 사용 (용량 최적화)
+FROM python:3.13-slim
 
 WORKDIR /app
 
