@@ -62,7 +62,7 @@ jobs:
 
   deploy:
     name: EC2 배포
-    runs-on: self-hosted
+    runs-on: [self-hosted, ai]
     needs: build-and-push
 
     steps:
