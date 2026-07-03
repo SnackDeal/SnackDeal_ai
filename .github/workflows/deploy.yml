@@ -6,6 +6,7 @@ on:
   pull_request:
     branches:
       - main
+      - dev
     types:
       - closed   # PR이 merge됐을 때만
 
