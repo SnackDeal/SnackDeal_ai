@@ -69,4 +69,4 @@ jobs:
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: 배포 실행
-        run: /home/ubuntu/snackdeal-ai/deployment.sh
+        run: /home/ubuntu/snackdeal/deployment.sh
