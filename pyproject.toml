@@ -3,5 +3,18 @@ name = "ai"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi==0.115.0",
+    "uvicorn[standard]==0.30.6",
+    "groq==0.31.0",
+    "pydantic==2.9.2",
+    "python-dotenv==1.0.1",
+    "langgraph==1.2.7",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest==8.4.1",
+    "pytest-asyncio==1.0.0",
+]
