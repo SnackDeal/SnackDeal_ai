@@ -1,127 +1,143 @@
-"""
-BDD-style tests for the QnA chatbot LangGraph service.
-
-Tests are structured as Given / When / Then and use mocked LLM calls
-so no real API key is required.
-"""
-
 from __future__ import annotations
 
+from fastapi.testclient import TestClient
 import pytest
-from unittest.mock import AsyncMock, patch
 
 from src.chatbot.schema import ChatbotRequest, ChatbotResponse
+from src.main import app
 
 
-# ============================================================================
-# Fixtures
-# ============================================================================
+class FakeGroqMessage:
+    content = "배송은 보통 주문 후 순차적으로 진행됩니다. 자세한 상태는 마이페이지 주문내역에서 확인해 주세요."
 
 
-@pytest.fixture
-def mock_llm_client():
-    """Return an AsyncMock that stands in for LlmClient.generate()."""
-    return AsyncMock()
+class FakeGroqChoice:
+    message = FakeGroqMessage()
 
 
-@pytest.fixture
-def service_with_mock_llm(mock_llm_client):
-    """Patch the global graph so every test uses the supplied mock LLM."""
+class FakeGroqCompletion:
+    choices = [FakeGroqChoice()]
+
+
+class FakeGroqCompletions:
+    def __init__(self) -> None:
+        self.last_payload = None
+
+    def create(self, **kwargs):
+        self.last_payload = kwargs
+        return FakeGroqCompletion()
+
+
+class FakeGroqClient:
+    def __init__(self) -> None:
+        self.chat = type("Chat", (), {})()
+        self.chat.completions = FakeGroqCompletions()
+
+
+@pytest.fixture(autouse=True)
+def reset_chatbot_graph():
     from src.chatbot import service as chatbot_service
-    from src.chatbot.service import _build_graph, _get_graph
 
-    # Clear the module-level cache so a fresh graph is built.
+    chatbot_service._graph = None
+    chatbot_service._llm = None
+    yield
     chatbot_service._graph = None
     chatbot_service._llm = None
 
-    class MockLlmClient:
-        async def generate(self, question: str, context: str) -> str:
-            return await mock_llm_client(question, context)
-
-    with patch.object(chatbot_service, "LlmClient", new=MockLlmClient):
-        yield chatbot_service
-
-
-# ============================================================================
-# Test 1 – Successful chatbot answer generation
-# ============================================================================
-
 
 @pytest.mark.asyncio
-async def test_chatbot_answer_success(service_with_mock_llm, mock_llm_client):
+async def test_chatbot_service_generates_answer_with_groq(monkeypatch):
     """
-    Given a valid user question
-    When the chatbot service processes it through the LangGraph pipeline
-    Then it should return a successful answer from the LLM.
+    Given a valid customer question
+    When the LangGraph chatbot pipeline generates an answer
+    Then it should call Groq with the configured Llama 3.1 8B model.
     """
     # Given
-    mock_llm_client.return_value = (
-        "안녕하세요! SnackDeal 고객센터입니다. 무엇을 도와드릴까요?"
-    )
-    req = ChatbotRequest(message="배송은 얼마나 걸리나요?")
+    from src.chatbot import service as chatbot_service
+
+    fake_client = FakeGroqClient()
+    monkeypatch.setenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    chatbot_service._llm = chatbot_service.LlmClient(groq_client=fake_client)
+    chatbot_service._graph = chatbot_service._build_graph(lambda: chatbot_service._llm)
 
     # When
-    result = await service_with_mock_llm.answer(req)
+    result = await chatbot_service.answer(ChatbotRequest(message="배송은 얼마나 걸리나요?"))
 
     # Then
     assert isinstance(result, ChatbotResponse)
-    assert result.answer == "안녕하세요! SnackDeal 고객센터입니다. 무엇을 도와드릴까요?"
-    mock_llm_client.assert_awaited_once()
-    question, context = mock_llm_client.await_args.args
-    assert question == "배송은 얼마나 걸리나요?"
-    assert "배송" in context
-    assert "SnackDeal 고객센터 기본 안내" in context
+    assert "마이페이지 주문내역" in result.answer
+    payload = fake_client.chat.completions.last_payload
+    assert payload["model"] == "llama-3.1-8b-instant"
+    assert payload["messages"][0]["role"] == "system"
+    assert "SnackDeal" in payload["messages"][0]["content"]
+    assert "배송은 얼마나 걸리나요?" in payload["messages"][1]["content"]
+    assert "배송" in payload["messages"][1]["content"]
 
 
-# ============================================================================
-# Test 2 – Blank question validation failure
-# ============================================================================
+def test_chatbot_ask_api_returns_common_response(monkeypatch):
+    """
+    Given a valid POST /chatbot/ask request
+    When the API processes the question
+    Then it should return the answer wrapped in CommonResponse format.
+    """
+    # Given
+    from src.chatbot import service as chatbot_service
+
+    fake_client = FakeGroqClient()
+    monkeypatch.setenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    chatbot_service._llm = chatbot_service.LlmClient(groq_client=fake_client)
+    chatbot_service._graph = chatbot_service._build_graph(lambda: chatbot_service._llm)
+    client = TestClient(app)
+
+    # When
+    response = client.post("/chatbot/ask", json={"message": "쿠폰은 어디서 확인해?"})
+
+    # Then
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["code"] == "SUCCESS"
+    assert body["message"] == "챗봇 응답 생성에 성공했습니다."
+    assert "answer" in body["data"]
+
+
+def test_chatbot_ask_api_returns_400_for_blank_message():
+    """
+    Given a blank chatbot message
+    When the API validates the request
+    Then it should return a 400 CommonResponse error.
+    """
+    # Given
+    client = TestClient(app)
+
+    # When
+    response = client.post("/chatbot/ask", json={"message": "   "})
+
+    # Then
+    assert response.status_code == 400
+    body = response.json()
+    assert body["success"] is False
+    assert body["code"] == "BAD_REQUEST"
+    assert body["data"] is None
 
 
 @pytest.mark.asyncio
-async def test_blank_question_validation_failure(
-    service_with_mock_llm, mock_llm_client
-):
+async def test_chatbot_service_returns_fallback_when_groq_key_is_missing(monkeypatch):
     """
-    Given an empty question string
-    When the chatbot service processes it
-    Then it should return a fallback error answer without calling the LLM.
+    Given no Groq API key is configured
+    When the LangGraph chatbot pipeline tries to generate an answer
+    Then it should return a user-facing setup fallback without calling Groq.
     """
     # Given
-    req = ChatbotRequest(message="   ")
+    from src.chatbot import service as chatbot_service
+
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    chatbot_service._llm = chatbot_service.LlmClient()
+    chatbot_service._graph = chatbot_service._build_graph(lambda: chatbot_service._llm)
 
     # When
-    result = await service_with_mock_llm.answer(req)
+    result = await chatbot_service.answer(ChatbotRequest(message="배송 알려줘"))
 
     # Then
     assert isinstance(result, ChatbotResponse)
-    assert "질문이 비어 있습니다" in result.answer
-    mock_llm_client.assert_not_called()
-
-
-# ============================================================================
-# Test 3 – LangGraph / LLM client failure fallback
-# ============================================================================
-
-
-@pytest.mark.asyncio
-async def test_llm_failure_fallback(service_with_mock_llm, mock_llm_client):
-    """
-    Given the LLM client raises an exception
-    When the chatbot service processes a valid question
-    Then it should return a graceful fallback error answer.
-    """
-    # Given
-    mock_llm_client.side_effect = RuntimeError("API unavailable")
-    req = ChatbotRequest(message="환불은 어떻게 하나요?")
-
-    # When
-    result = await service_with_mock_llm.answer(req)
-
-    # Then
-    assert isinstance(result, ChatbotResponse)
-    assert "답변 생성 중 오류가 발생했습니다" in result.answer
-    mock_llm_client.assert_awaited_once()
-    question, context = mock_llm_client.await_args.args
-    assert question == "환불은 어떻게 하나요?"
-    assert "환불" in context
+    assert "챗봇 API 키가 설정되지 않았습니다" in result.answer

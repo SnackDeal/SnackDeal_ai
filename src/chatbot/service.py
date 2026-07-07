@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from functools import partial
 from typing import Any, Protocol, TypedDict
 
-import anthropic
+from groq import APIConnectionError, APIStatusError, Groq, RateLimitError
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -24,6 +25,10 @@ SnackDeal 고객센터 기본 안내:
 """.strip()
 
 FALLBACK_ANSWER = "답변 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+MISSING_API_KEY_ANSWER = "챗봇 API 키가 설정되지 않았습니다. 관리자에게 문의해 주세요."
+RATE_LIMIT_ANSWER = "현재 챗봇 요청이 많습니다. 잠시 후 다시 시도해 주세요."
+CONNECTION_ERROR_ANSWER = "챗봇 서버 연결이 불안정합니다. 잠시 후 다시 시도해 주세요."
+DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant"
 
 
 class ChatbotLlm(Protocol):
@@ -31,8 +36,14 @@ class ChatbotLlm(Protocol):
         pass
 
 
+class ChatbotGenerationError(Exception):
+    def __init__(self, user_message: str) -> None:
+        super().__init__(user_message)
+        self.user_message = user_message
+
+
 class LlmClient:
-    """Thin wrapper around the Anthropic client for chatbot answers."""
+    """Thin wrapper around the Groq client for chatbot answers."""
 
     SYSTEM_PROMPT = (
         "당신은 SnackDeal(과자 쇼핑몰) 고객센터 챗봇입니다.\n"
@@ -40,23 +51,45 @@ class LlmClient:
         "모르는 내용은 솔직히 모른다고 하고 고객센터 문의를 안내하세요.\n"
     )
 
-    def __init__(self, client: anthropic.Anthropic | None = None) -> None:
-        self._client = client or anthropic.Anthropic()
+    def __init__(self, groq_client: Groq | None = None) -> None:
+        self._groq_client = groq_client
+        self._groq_model = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL)
 
     async def generate(self, question: str, context: str) -> str:
+        if self._groq_client is None and not os.getenv("GROQ_API_KEY"):
+            raise ChatbotGenerationError(MISSING_API_KEY_ANSWER)
+
         user_message = f"""[고객 질문]
 {question}
 
 [참고 가능한 고객센터 컨텍스트]
 {context}
 """
-        message = self._client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            system=self.SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        )
-        return message.content[0].text
+        completion = self._request_completion(user_message)
+        return completion.choices[0].message.content or ""
+
+    def _request_completion(self, user_message: str):
+        client = self._groq_client or Groq()
+        try:
+            return client.chat.completions.create(
+                model=self._groq_model,
+                messages=[
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=0.3,
+                max_completion_tokens=1024,
+                top_p=1,
+                stream=False,
+                stop=None,
+            )
+        except RateLimitError as exc:
+            raise ChatbotGenerationError(RATE_LIMIT_ANSWER) from exc
+        except APIConnectionError as exc:
+            raise ChatbotGenerationError(CONNECTION_ERROR_ANSWER) from exc
+        except APIStatusError as exc:
+            logger.warning("Groq API status error: status_code=%s", exc.status_code)
+            raise ChatbotGenerationError(FALLBACK_ANSWER) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -112,8 +145,11 @@ async def _generate_answer(
 ) -> dict[str, Any]:
     try:
         answer = await llm_provider().generate(state["question"], state["context"])
+    except ChatbotGenerationError as exc:
+        logger.warning("Chatbot answer generation failed: %s", exc.user_message)
+        return {"error": exc.user_message}
     except Exception:
-        logger.warning("Chatbot answer generation failed")
+        logger.exception("Unexpected chatbot answer generation failure")
         return {"error": FALLBACK_ANSWER}
     return {"answer": answer}
 
