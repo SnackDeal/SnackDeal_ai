@@ -1,9 +1,12 @@
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from src.chatbot.router import router as chatbot_router
 from src.qna_assist.router import router as qna_assist_router
 from src.common.schema import CommonResponse
+
+load_dotenv()
 
 app = FastAPI(title="SnackDeal AI Service")
 
